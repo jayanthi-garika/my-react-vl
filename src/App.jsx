@@ -34,6 +34,7 @@ const SEED = {
   ],
   passwordResets: [],
   resourceMovements: [],
+  movementRequests: [],  // { id, resourceId, requestedBy, fromProjectIds, toProjectIds, projectHoursAllocation, effectiveDate, reason, movementType, notes, status:"Pending"|"Approved"|"Rejected", approverId, approverComment, createdAt, resolvedAt }
 };
 
 // ── Utils ──────────────────────────────────────────────
@@ -1233,12 +1234,52 @@ function EmployeeReport({ data, currentUser, isHR }) {
 function ProjectReport({ data }) {
   const [selectedProj, setSelectedProj]= useState("all");
   const projects= selectedProj==="all"?data.projects:data.projects.filter(p=>p.id===selectedProj);
+  const movements=data.resourceMovements||[];
+
+  // Get latest allocated h/day for an employee on a project
+  function getAllocatedHours(empId, projId) {
+    const mv=[...movements.filter(m=>m.resourceId===empId&&(m.toProjectIds||[]).includes(projId))].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate));
+    return mv[0]?.projectHoursAllocation?.[projId]||0;
+  }
+
+  function exportProjectReport() {
+    const XLSX=window.XLSX;
+    const headers=["Project","Category","Employee","Role","Days Active","Allocated h/day","Total Hours Logged","Approved Hours","Pending Hours","Entries","Utilisation %"];
+    const rows=[];
+    projects.forEach(proj=>{
+      const projLogs=data.timeLogs.filter(t=>t.projectId===proj.id);
+      data.resources.forEach(emp=>{
+        const empLogs=projLogs.filter(t=>t.resourceId===emp.id);
+        if(!empLogs.length) return;
+        const hours=empLogs.reduce((s,t)=>s+t.hours,0);
+        const days=[...new Set(empLogs.map(t=>t.date))].length;
+        const approvedH=empLogs.filter(t=>t.status==="Approved").reduce((s,t)=>s+t.hours,0);
+        const allocH=getAllocatedHours(emp.id,proj.id);
+        const expected=allocH>0?allocH*days:null;
+        const utilPct=expected?Math.round((hours/expected)*100):null;
+        rows.push([proj.name,proj.category,emp.name,emp.role,days,allocH||"Not set",hours,approvedH,hours-approvedH,empLogs.length,utilPct!=null?`${utilPct}%`:"—"]);
+      });
+    });
+    if (XLSX) {
+      const wb=XLSX.utils.book_new();
+      const ws=XLSX.utils.aoa_to_sheet([headers,...rows]);
+      ws["!cols"]=[{wch:30},{wch:18},{wch:22},{wch:26},{wch:12},{wch:16},{wch:18},{wch:16},{wch:16},{wch:10},{wch:14}];
+      headers.forEach((_,i)=>{const c=ws[XLSX.utils.encode_cell({r:0,c:i})];if(c)c.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
+      XLSX.utils.book_append_sheet(wb,ws,"Project Report");
+      XLSX.writeFile(wb,`Project_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
+    } else {
+      downloadCSV(`Project_Report_${new Date().toISOString().slice(0,10)}.csv`,toCSV(headers,rows));
+    }
+  }
 
   return (
     <div>
-      <div style={{ marginBottom:24 }}>
-        <div className="section-title">Project-wise Report</div>
-        <div style={{ fontSize:13, color:"#475569", marginTop:4 }}>Hours and days spent by employees on each project</div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24 }}>
+        <div>
+          <div className="section-title">Project-wise Report</div>
+          <div style={{ fontSize:13, color:"#475569", marginTop:4 }}>Hours logged vs allocated hours per employee per project</div>
+        </div>
+        <button className="btn-coral" onClick={exportProjectReport}>⬇ Download Excel</button>
       </div>
       <div style={{ marginBottom:20 }}>
         <select className="inp" value={selectedProj} onChange={e=>setSelectedProj(e.target.value)} style={{ width:280 }}>
@@ -1257,11 +1298,17 @@ function ProjectReport({ data }) {
             const hours=empLogs.reduce((s,t)=>s+t.hours,0);
             const days=[...new Set(empLogs.map(t=>t.date))].length;
             const approvedH=empLogs.filter(t=>t.status==="Approved").reduce((s,t)=>s+t.hours,0);
-            return {emp,empLogs,hours,days,approvedH};
+            const allocH=getAllocatedHours(emp.id,proj.id);
+            const expected=allocH>0?allocH*days:null;
+            const utilPct=expected?Math.min(200,Math.round((hours/expected)*100)):null;
+            return {emp,empLogs,hours,days,approvedH,allocH,expected,utilPct};
           }).filter(Boolean);
+
+          const totalAllocPerDay=empBreakdown.reduce((s,e)=>s+(e.allocH||0),0);
 
           return (
             <div key={proj.id} className="card" style={{ padding:0, overflow:"hidden" }}>
+              {/* Header */}
               <div style={{ background:"linear-gradient(135deg,#2B2D42,#1A1D27)", padding:"18px 22px", borderBottom:"1px solid #2A2D3E" }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
                   <div>
@@ -1269,39 +1316,92 @@ function ProjectReport({ data }) {
                     <div style={{ fontSize:12, color:"#64748B", marginTop:4 }}>{proj.category} · {fmt(proj.startDate)} – {fmt(proj.endDate)}</div>
                   </div>
                   <div style={{ display:"flex", gap:20, textAlign:"right" }}>
-                    <div><div style={{ fontSize:22, fontFamily:"'Syne',sans-serif", fontWeight:800, color:"#EF6461" }}>{totalH}h</div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase" }}>Total Hours</div></div>
+                    <div><div style={{ fontSize:22, fontFamily:"'Syne',sans-serif", fontWeight:800, color:"#EF6461" }}>{totalH}h</div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase" }}>Total Logged</div></div>
                     <div><div style={{ fontSize:22, fontFamily:"'Syne',sans-serif", fontWeight:800, color:"#60A5FA" }}>{totalDays}d</div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase" }}>Equiv. Days</div></div>
                     <div><div style={{ fontSize:22, fontFamily:"'Syne',sans-serif", fontWeight:800, color:"#34D399" }}>{empBreakdown.length}</div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase" }}>Contributors</div></div>
+                    {totalAllocPerDay>0&&<div><div style={{ fontSize:22, fontFamily:"'Syne',sans-serif", fontWeight:800, color:"#A78BFA" }}>{totalAllocPerDay}h</div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase" }}>Allocated/Day</div></div>}
                   </div>
                 </div>
               </div>
+
               {empBreakdown.length===0?(
                 <div style={{ padding:"20px 22px", fontSize:13, color:"#334155" }}>No time logged for this project yet.</div>
               ):(
-                <table>
-                  <thead><tr><th>Employee</th><th>Role</th><th>Days Active</th><th>Total Hours</th><th>Approved Hours</th><th>Pending Hours</th><th>Entries</th></tr></thead>
-                  <tbody>
-                    {empBreakdown.map(({emp,empLogs,hours,days,approvedH})=>{
-                      const pendingH=hours-approvedH;
-                      return (
-                        <tr key={emp.id}>
-                          <td>
-                            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                              <div style={{ width:28, height:28, borderRadius:"50%", background:`linear-gradient(135deg,${stringToColor(emp.name)})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#fff", flexShrink:0 }}>{emp.name.split(" ").map(n=>n[0]).join("").slice(0,2)}</div>
-                              <span style={{ fontWeight:600, color:"#F1F5F9" }}>{emp.name}</span>
-                            </div>
+                <div style={{ overflowX:"auto" }}>
+                  <table style={{ minWidth:700 }}>
+                    <thead>
+                      <tr>
+                        <th>Employee</th>
+                        <th>Role</th>
+                        <th>Days Active</th>
+                        <th>Allocated h/day</th>
+                        <th>Expected Hours</th>
+                        <th>Actual Hours</th>
+                        <th>Utilisation</th>
+                        <th>Approved</th>
+                        <th>Pending</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {empBreakdown.map(({emp,empLogs,hours,days,approvedH,allocH,expected,utilPct})=>{
+                        const pendingH=hours-approvedH;
+                        const over=utilPct!=null&&utilPct>100;
+                        const under=utilPct!=null&&utilPct<80;
+                        const utilColor=over?"#EF6461":under?"#FBBf24":"#34D399";
+                        return (
+                          <tr key={emp.id}>
+                            <td>
+                              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                                <div style={{ width:28, height:28, borderRadius:"50%", background:`linear-gradient(135deg,${stringToColor(emp.name)})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#fff", flexShrink:0 }}>{emp.name.split(" ").map(n=>n[0]).join("").slice(0,2)}</div>
+                                <span style={{ fontWeight:600, color:"#F1F5F9" }}>{emp.name}</span>
+                              </div>
+                            </td>
+                            <td style={{ fontSize:12, color:"#64748B" }}>{emp.role}</td>
+                            <td style={{ fontWeight:700, color:"#60A5FA" }}>{days}d</td>
+                            <td>
+                              {allocH>0
+                                ? <span style={{ fontWeight:700, color:"#A78BFA", background:"rgba(167,139,250,.12)", padding:"3px 9px", borderRadius:8 }}>{allocH}h/day</span>
+                                : <span style={{ fontSize:11, color:"#334155" }}>Not set</span>}
+                            </td>
+                            <td style={{ color:"#64748B", fontSize:12 }}>
+                              {expected!=null?<span style={{ fontWeight:600, color:"#94A3B8" }}>{expected}h</span>:<span style={{ color:"#334155" }}>—</span>}
+                              {expected!=null&&<div style={{ fontSize:10, color:"#475569" }}>({allocH}h × {days}d)</div>}
+                            </td>
+                            <td style={{ fontWeight:700, color:"#EF6461", fontSize:15 }}>{hours}h</td>
+                            <td>
+                              {utilPct!=null?(
+                                <div>
+                                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                                    <span style={{ fontWeight:800, fontSize:14, fontFamily:"'Syne',sans-serif", color:utilColor }}>{utilPct}%</span>
+                                    <span style={{ fontSize:10, color:utilColor }}>{over?"▲ Over":under?"▼ Under":"✓ On track"}</span>
+                                  </div>
+                                  <div style={{ marginTop:4, height:4, background:"#1E2130", borderRadius:4, overflow:"hidden", width:80 }}>
+                                    <div style={{ height:"100%", width:`${Math.min(100,utilPct)}%`, background:utilColor, borderRadius:4, transition:"width .3s" }}></div>
+                                  </div>
+                                </div>
+                              ):<span style={{ fontSize:11, color:"#334155" }}>—</span>}
+                            </td>
+                            <td style={{ color:"#34D399", fontWeight:600 }}>{approvedH}h</td>
+                            <td style={{ color:pendingH>0?"#FBBf24":"#334155", fontWeight:600 }}>{pendingH}h</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    {empBreakdown.some(e=>e.allocH>0)&&(
+                      <tfoot>
+                        <tr style={{ background:"#141720" }}>
+                          <td colSpan={3} style={{ fontWeight:700, color:"#64748B", fontSize:12, borderTop:"2px solid #2A2D3E" }}>Project Total</td>
+                          <td style={{ fontWeight:700, color:"#A78BFA", borderTop:"2px solid #2A2D3E" }}>{totalAllocPerDay>0?`${totalAllocPerDay}h/day`:""}</td>
+                          <td style={{ color:"#64748B", fontSize:12, borderTop:"2px solid #2A2D3E" }}>
+                            {(()=>{const totalExp=empBreakdown.filter(e=>e.expected!=null).reduce((s,e)=>s+e.expected,0);return totalExp>0?`${totalExp}h exp.`:"";})()}
                           </td>
-                          <td style={{ fontSize:12, color:"#64748B" }}>{emp.role}</td>
-                          <td style={{ fontWeight:700, color:"#60A5FA" }}>{days} day{days!==1?"s":""}</td>
-                          <td style={{ fontWeight:700, color:"#EF6461" }}>{hours}h</td>
-                          <td style={{ color:"#34D399", fontWeight:600 }}>{approvedH}h</td>
-                          <td style={{ color:pendingH>0?"#FBBf24":"#334155", fontWeight:600 }}>{pendingH}h</td>
-                          <td style={{ color:"#64748B" }}>{empLogs.length}</td>
+                          <td style={{ fontWeight:800, color:"#EF6461", fontSize:15, fontFamily:"'Syne',sans-serif", borderTop:"2px solid #2A2D3E" }}>{totalH}h</td>
+                          <td colSpan={3} style={{ borderTop:"2px solid #2A2D3E" }}></td>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
               )}
             </div>
           );
@@ -1388,7 +1488,7 @@ function PasswordMgmt({ data, updateData, showToast }) {
 // ══════════════════════════════════════════════
 function ResourceMovement({ data, updateData, showToast }) {
   const today=new Date().toISOString().split("T")[0];
-  const [form, setForm]= useState({ resourceId:"", fromProjectIds:[], toProjectIds:[], effectiveDate:today, reason:"", movementType:"Transfer", notes:"" });
+  const [form, setForm]= useState({ resourceId:"", fromProjectIds:[], toProjectIds:[], projectHoursAllocation:{}, effectiveDate:today, reason:"", movementType:"Transfer", notes:"" });
   const [tab, setTab]= useState("new");
   const movements=data.resourceMovements||[];
   const MOVEMENT_TYPES=["Transfer","Rotation","Secondment","Reallocation","Back-fill","Addition","Release"];
@@ -1413,19 +1513,51 @@ function ResourceMovement({ data, updateData, showToast }) {
   }
   function handleToChange(projId,checked) {
     const newIds=checked?[...form.toProjectIds,projId]:form.toProjectIds.filter(id=>id!==projId);
-    setForm(p=>({...p,toProjectIds:newIds}));
+    // Remove allocation entry when unchecked
+    const newAlloc={...form.projectHoursAllocation};
+    if(!checked) delete newAlloc[projId];
+    setForm(p=>({...p,toProjectIds:newIds,projectHoursAllocation:newAlloc}));
+  }
+  function setProjectHours(projId,val) {
+    const hours=Math.max(0,Math.min(24,parseFloat(val)||0));
+    setForm(p=>({...p,projectHoursAllocation:{...p.projectHoursAllocation,[projId]:hours}}));
   }
   function submit() {
     if(!form.resourceId) return showToast("Select a resource","error");
     if(!form.toProjectIds.length) return showToast("Select at least one destination project","error");
     const overlap=form.toProjectIds.filter(id=>form.fromProjectIds.includes(id));
     if(overlap.length) return showToast("From and To projects cannot overlap","error");
-    const movement={id:uid(),resourceId:form.resourceId,fromProjectIds:form.fromProjectIds,toProjectIds:form.toProjectIds,effectiveDate:form.effectiveDate,reason:form.reason,movementType:form.movementType,notes:form.notes,createdAt:new Date().toISOString()};
-    updateData(prev=>({...prev,resourceMovements:[...(prev.resourceMovements||[]),movement]}));
+    const totalAlloc=form.toProjectIds.reduce((s,id)=>s+(form.projectHoursAllocation[id]||0),0);
+    if(totalAlloc>24) return showToast("Total allocated hours cannot exceed 24h/day","error");
+
     const res=data.resources.find(r=>r.id===form.resourceId);
-    showToast(`${res?.name} movement recorded`);
-    setForm({resourceId:"",fromProjectIds:[],toProjectIds:[],effectiveDate:today,reason:"",movementType:"Transfer",notes:""});
-    setTab("history");
+    const manager=data.resources.find(r=>r.id===res?.managerId);
+
+    // Save as pending request — manager must approve before it becomes a movement
+    const request={
+      id:uid(),
+      resourceId:form.resourceId,
+      requestedBy:"HR",   // HR Admin initiated
+      fromProjectIds:form.fromProjectIds,
+      toProjectIds:form.toProjectIds,
+      projectHoursAllocation:form.projectHoursAllocation,
+      effectiveDate:form.effectiveDate,
+      reason:form.reason,
+      movementType:form.movementType,
+      notes:form.notes,
+      status:"Pending",
+      approverId:null,
+      approverComment:"",
+      createdAt:new Date().toISOString(),
+      resolvedAt:null,
+    };
+    updateData(prev=>({...prev,movementRequests:[...(prev.movementRequests||[]),request]}));
+    showToast(manager
+      ? `Request sent to ${manager.name} for approval`
+      : `Movement request created — awaiting manager approval`
+    );
+    setForm({resourceId:"",fromProjectIds:[],toProjectIds:[],projectHoursAllocation:{},effectiveDate:today,reason:"",movementType:"Transfer",notes:""});
+    setTab("requests");
   }
   function deleteMovement(id) {
     updateData(prev=>({...prev,resourceMovements:prev.resourceMovements.filter(m=>m.id!==id)}));
@@ -1436,13 +1568,15 @@ function ResourceMovement({ data, updateData, showToast }) {
     if (!movements.length) return showToast("No movements to export","error");
     const XLSX = window.XLSX;
     if (!XLSX) {
-      // Fallback to CSV if SheetJS not available
-      const headers=["Employee ID","Employee Name","Role","Movement Type","From Projects","To Projects","Effective Date","Reason","Notes","Recorded At"];
+      const headers=["Employee ID","Employee Name","Role","Movement Type","From Projects","To Projects","Hours/Day (per project)","Total Hours/Day","Effective Date","Reason","Notes","Recorded At"];
       const rows=filteredMovements.map(m=>{
         const res=data.resources.find(r=>r.id===m.resourceId);
         const fromNames=(m.fromProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)?.name||"").join("; ");
-        const toNames=(m.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)?.name||"").join("; ");
-        return[res?.id||"",res?.name||"",res?.role||"",m.movementType,fromNames||"—",toNames,m.effectiveDate,m.reason||"",m.notes||"",new Date(m.createdAt).toLocaleString("en-IN")];
+        const toProjs=(m.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+        const alloc=m.projectHoursAllocation||{};
+        const allocStr=toProjs.map(p=>alloc[p.id]?`${p.name}: ${alloc[p.id]}h`:p.name).join("; ");
+        const totalAlloc=toProjs.reduce((s,p)=>s+(alloc[p.id]||0),0);
+        return[res?.id||"",res?.name||"",res?.role||"",m.movementType,fromNames||"—",toProjs.map(p=>p.name).join("; "),allocStr,totalAlloc||"",m.effectiveDate,m.reason||"",m.notes||"",new Date(m.createdAt).toLocaleString("en-IN")];
       });
       downloadCSV(`Resource_Movements_${new Date().toISOString().slice(0,10)}.csv`,toCSV(headers,rows));
       showToast("Movements exported as CSV");
@@ -1451,60 +1585,91 @@ function ResourceMovement({ data, updateData, showToast }) {
 
     const wb = XLSX.utils.book_new();
 
-    // ── Sheet 1: Movement Log (chronological) ──────────────
-    const logHeaders=["#","Employee ID","Employee Name","Designation / Role","Movement Type","From Projects","To Projects","Effective Date","Reason","Notes","Recorded At"];
+    // ── Sheet 1: Movement Log ──────────────────────────────
+    const logHeaders=["#","Employee ID","Employee Name","Designation / Role","Movement Type","From Projects","To Projects","Allocated Hours / Project","Total Allocated (h/day)","Effective Date","Reason","Notes","Recorded At"];
     const logRows=filteredMovements.map((m,i)=>{
       const res=data.resources.find(r=>r.id===m.resourceId);
       const fromNames=(m.fromProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)?.name||"").join("; ");
-      const toNames=(m.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)?.name||"").join("; ");
-      return[i+1,res?.id||"",res?.name||"",res?.role||"",m.movementType,fromNames||"— New Assignment",toNames,m.effectiveDate,m.reason||"",m.notes||"",new Date(m.createdAt).toLocaleDateString("en-IN")];
+      const toProjs=(m.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+      const alloc=m.projectHoursAllocation||{};
+      const allocStr=toProjs.map(p=>alloc[p.id]?`${p.name}: ${alloc[p.id]}h/day`:p.name).join("; ");
+      const totalAlloc=toProjs.reduce((s,p)=>s+(alloc[p.id]||0),0);
+      return[i+1,res?.id||"",res?.name||"",res?.role||"",m.movementType,fromNames||"— New Assignment",toProjs.map(p=>p.name).join("; "),allocStr,totalAlloc||"—",m.effectiveDate,m.reason||"",m.notes||"",new Date(m.createdAt).toLocaleDateString("en-IN")];
     });
     const ws1=XLSX.utils.aoa_to_sheet([logHeaders,...logRows]);
-    ws1["!cols"]=[{wch:4},{wch:12},{wch:22},{wch:26},{wch:14},{wch:36},{wch:36},{wch:14},{wch:28},{wch:30},{wch:16}];
-    // Bold header row
-    logHeaders.forEach((_,i)=>{
-      const cell=ws1[XLSX.utils.encode_cell({r:0,c:i})];
-      if(cell) cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};
-    });
+    ws1["!cols"]=[{wch:4},{wch:12},{wch:22},{wch:26},{wch:14},{wch:30},{wch:30},{wch:40},{wch:16},{wch:14},{wch:28},{wch:28},{wch:16}];
+    logHeaders.forEach((_,i)=>{const cell=ws1[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
     XLSX.utils.book_append_sheet(wb,ws1,"Movement Log");
 
-    // ── Sheet 2: Resource Summary ──────────────────────────
-    const sumHeaders=["Employee ID","Employee Name","Role","Total Movements","Current Projects","All Projects Ever","Last Movement Date","Last Movement Type","Last Reason"];
+    // ── Sheet 2: Resource → Project Hour Allocation ────────
+    // One row per employee-project pair (latest active allocation)
+    const allocHeaders=["Employee ID","Employee Name","Designation / Role","Project","Allocated Hours/Day","% of Workday (8h)","Effective From","Movement Type","Reason"];
+    const allocRows=[];
+    data.resources.forEach(r=>{
+      const active=getActiveProjects(r.id);
+      if(!active.length) return;
+      const latestMv=[...movements.filter(m=>m.resourceId===r.id)].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate))[0];
+      const alloc=latestMv?.projectHoursAllocation||{};
+      const totalH=active.reduce((s,p)=>s+(alloc[p.id]||0),0);
+      active.forEach(p=>{
+        const h=alloc[p.id]||0;
+        const pct=totalH>0?Math.round((h/totalH)*100):h>0?100:0;
+        const wdPct=h>0?Math.round((h/8)*100):0;
+        allocRows.push([r.id,r.name,r.role,p.name,h||"Not specified",h>0?`${wdPct}% of workday`:"—",latestMv?.effectiveDate||"",latestMv?.movementType||"",latestMv?.reason||""]);
+      });
+      if(active.length>1&&totalH>0){
+        allocRows.push([r.id,r.name,"","TOTAL →",totalH,`${Math.round((totalH/8)*100)}% of workday`,"","",""]);
+      }
+    });
+    const ws2=XLSX.utils.aoa_to_sheet([allocHeaders,...allocRows]);
+    ws2["!cols"]=[{wch:12},{wch:22},{wch:26},{wch:30},{wch:18},{wch:20},{wch:14},{wch:16},{wch:28}];
+    allocHeaders.forEach((_,i)=>{const cell=ws2[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
+    XLSX.utils.book_append_sheet(wb,ws2,"Hour Allocations");
+
+    // ── Sheet 3: Resource Summary ──────────────────────────
+    const sumHeaders=["Employee ID","Employee Name","Role","Total Movements","Current Projects","Hours/Day Each","Total Hrs/Day","All Projects Ever","Last Movement","Last Type","Last Reason"];
     const sumRows=data.resources.map(r=>{
       const mv=[...movements.filter(m=>m.resourceId===r.id)].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate));
       if(!mv.length) return null;
-      const curProjs=getActiveProjects(r.id).map(p=>p.name).join(", ");
+      const active=getActiveProjects(r.id);
+      const latestAlloc=mv[0]?.projectHoursAllocation||{};
+      const curProjs=active.map(p=>p.name).join(", ");
+      const curAllocStr=active.map(p=>latestAlloc[p.id]?`${p.name}(${latestAlloc[p.id]}h)`:p.name).join(", ");
+      const totalHDay=active.reduce((s,p)=>s+(latestAlloc[p.id]||0),0);
       const allProjIds=new Set(mv.flatMap(m=>[...(m.fromProjectIds||[]),...(m.toProjectIds||[])]));
       const allProjs=[...allProjIds].map(id=>data.projects.find(p=>p.id===id)?.name||"").filter(Boolean).join(", ");
       const last=mv[0];
-      return[r.id,r.name,r.role,mv.length,curProjs||"— Unassigned",allProjs,last.effectiveDate,last.movementType,last.reason||""];
+      return[r.id,r.name,r.role,mv.length,curProjs||"—",curAllocStr||"—",totalHDay||"—",allProjs,last.effectiveDate,last.movementType,last.reason||""];
     }).filter(Boolean);
-    const ws2=XLSX.utils.aoa_to_sheet([sumHeaders,...sumRows]);
-    ws2["!cols"]=[{wch:12},{wch:22},{wch:26},{wch:16},{wch:36},{wch:40},{wch:16},{wch:16},{wch:28}];
-    sumHeaders.forEach((_,i)=>{const cell=ws2[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
-    XLSX.utils.book_append_sheet(wb,ws2,"Resource Summary");
+    const ws3=XLSX.utils.aoa_to_sheet([sumHeaders,...sumRows]);
+    ws3["!cols"]=[{wch:12},{wch:22},{wch:26},{wch:14},{wch:28},{wch:36},{wch:14},{wch:36},{wch:14},{wch:16},{wch:28}];
+    sumHeaders.forEach((_,i)=>{const cell=ws3[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
+    XLSX.utils.book_append_sheet(wb,ws3,"Resource Summary");
 
-    // ── Sheet 3: Project Allocation Matrix ─────────────────
-    const projNames=data.projects.map(p=>p.name);
-    const matrixHeaders=["Employee ID","Employee Name","Role","Total Movements",...projNames,"Currently Active On"];
-    const matrixRows=data.resources.map(r=>{
-      const mv=movements.filter(m=>m.resourceId===r.id);
-      const curProjs=getActiveProjects(r.id).map(p=>p.name).join(", ");
-      const projsWorked=new Set(mv.flatMap(m=>[...(m.fromProjectIds||[]),...(m.toProjectIds||[])]));
-      const curProjIds=new Set(getActiveProjects(r.id).map(p=>p.id));
-      const projCells=data.projects.map(p=>{
-        if(curProjIds.has(p.id)) return "Current";
-        if(projsWorked.has(p.id)) return "Past";
-        return "";
+    // ── Sheet 4: Allocation Matrix (Project × Employee) ────
+    const activeResources=data.resources.filter(r=>movements.some(m=>m.resourceId===r.id));
+    const matrixHeaders=["Project","Category",...activeResources.map(r=>r.name),"Total Allocated (h/day)"];
+    const matrixRows=data.projects.map(proj=>{
+      const empCells=activeResources.map(r=>{
+        const active=getActiveProjects(r.id);
+        const isActive=active.some(p=>p.id===proj.id);
+        if(!isActive) return "";
+        const latestMv=[...movements.filter(m=>m.resourceId===r.id)].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate))[0];
+        const h=latestMv?.projectHoursAllocation?.[proj.id]||0;
+        return h>0?`${h}h/day`:"Active";
       });
-      return[r.id,r.name,r.role,mv.length,...projCells,curProjs||"—"];
+      const projTotal=activeResources.reduce((s,r)=>{
+        const latestMv=[...movements.filter(m=>m.resourceId===r.id)].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate))[0];
+        return s+(latestMv?.projectHoursAllocation?.[proj.id]||0);
+      },0);
+      return[proj.name,proj.category,...empCells,projTotal||""];
     });
-    const ws3=XLSX.utils.aoa_to_sheet([matrixHeaders,...matrixRows]);
-    ws3["!cols"]=[{wch:12},{wch:22},{wch:26},{wch:14},...data.projects.map(()=>({wch:12})),{wch:36}];
-    matrixHeaders.forEach((_,i)=>{const cell=ws3[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
-    XLSX.utils.book_append_sheet(wb,ws3,"Allocation Matrix");
+    const ws4=XLSX.utils.aoa_to_sheet([matrixHeaders,...matrixRows]);
+    ws4["!cols"]=[{wch:30},{wch:18},...activeResources.map(()=>({wch:14})),{wch:18}];
+    matrixHeaders.forEach((_,i)=>{const cell=ws4[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
+    XLSX.utils.book_append_sheet(wb,ws4,"Allocation Matrix");
 
-    // ── Sheet 4: Movement Type Summary ────────────────────
+    // ── Sheet 5: Movement Type Summary ────────────────────
     const typeHeaders=["Movement Type","Count","Employees Involved","Most Recent Date"];
     const typeMap={};
     filteredMovements.forEach(m=>{
@@ -1514,16 +1679,18 @@ function ResourceMovement({ data, updateData, showToast }) {
       typeMap[m.movementType].dates.push(m.effectiveDate);
     });
     const typeRows=Object.entries(typeMap).map(([type,d])=>[type,d.count,d.emps.size,[...d.dates].sort().reverse()[0]]);
-    const ws4=XLSX.utils.aoa_to_sheet([typeHeaders,...typeRows]);
-    ws4["!cols"]=[{wch:16},{wch:8},{wch:20},{wch:16}];
-    typeHeaders.forEach((_,i)=>{const cell=ws4[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
-    XLSX.utils.book_append_sheet(wb,ws4,"By Movement Type");
+    const ws5=XLSX.utils.aoa_to_sheet([typeHeaders,...typeRows]);
+    ws5["!cols"]=[{wch:16},{wch:8},{wch:20},{wch:16}];
+    typeHeaders.forEach((_,i)=>{const cell=ws5[XLSX.utils.encode_cell({r:0,c:i})];if(cell)cell.s={font:{bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"2B2D42"}}};});
+    XLSX.utils.book_append_sheet(wb,ws5,"By Movement Type");
 
     XLSX.writeFile(wb,`Resource_Movement_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast("Resource movement report downloaded!");
   }
 
   const filteredMovements=[...movements].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate));
+  const allRequests=(data.movementRequests||[]).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  const pendingReqCount=allRequests.filter(r=>r.status==="Pending").length;
   const activeOnSelected=form.resourceId?getActiveProjects(form.resourceId):[];
 
   return (
@@ -1531,7 +1698,7 @@ function ResourceMovement({ data, updateData, showToast }) {
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24 }}>
         <div>
           <div className="section-title">Resource Movement</div>
-          <div style={{ fontSize:13, color:"#475569", marginTop:4 }}>Assign resources to projects · Track transfers and history</div>
+          <div style={{ fontSize:13, color:"#475569", marginTop:4 }}>Assign resources to projects · Requires manager approval</div>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           {movements.length>0&&(
@@ -1540,8 +1707,17 @@ function ResourceMovement({ data, updateData, showToast }) {
             </button>
           )}
           <div style={{ display:"flex", background:"#141720", border:"1px solid #2A2D3E", borderRadius:9, padding:3, gap:3 }}>
-            {[{id:"new",label:"New Movement"},{id:"history",label:`History (${movements.length})`},{id:"matrix",label:"Allocation View"}].map(t=>(
-              <button key={t.id} onClick={()=>setTab(t.id)} style={{ background:tab===t.id?"linear-gradient(135deg,#EF6461,#D94F4C)":"transparent", color:tab===t.id?"#fff":"#64748B", border:"none", borderRadius:7, padding:"7px 14px", fontSize:12, fontWeight:600, cursor:"pointer", transition:"all .18s" }}>{t.label}</button>
+            {[
+              {id:"new",label:"New Request"},
+              {id:"requests",label:`Requests (${allRequests.length})`,badge:pendingReqCount},
+              {id:"history",label:`Approved (${movements.length})`},
+              {id:"matrix",label:"Allocation View"},
+            ].map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)}
+                style={{ background:tab===t.id?"linear-gradient(135deg,#EF6461,#D94F4C)":"transparent", color:tab===t.id?"#fff":"#64748B", border:"none", borderRadius:7, padding:"7px 14px", fontSize:12, fontWeight:600, cursor:"pointer", transition:"all .18s", display:"flex", alignItems:"center", gap:5 }}>
+                {t.label}
+                {t.badge>0&&<span style={{ background:"#FBBf24", color:"#0F1117", borderRadius:20, padding:"0 5px", fontSize:10, fontWeight:800 }}>{t.badge}</span>}
+              </button>
             ))}
           </div>
         </div>
@@ -1587,19 +1763,58 @@ function ResourceMovement({ data, updateData, showToast }) {
                 {data.projects.filter(p=>!form.fromProjectIds.includes(p.id)).map(p=>(
                   <label key={p.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"5px 0", cursor:"pointer", borderBottom:"1px solid #1E2130" }}>
                     <input type="checkbox" checked={form.toProjectIds.includes(p.id)} onChange={e=>handleToChange(p.id,e.target.checked)} />
-                    <span style={{ fontSize:13, color:form.toProjectIds.includes(p.id)?"#34D399":"#CBD5E1" }}>{p.name}</span>
-                    {form.toProjectIds.includes(p.id)&&<span style={{ color:"#34D399", fontSize:14, marginLeft:"auto" }}>✓</span>}
+                    <span style={{ fontSize:13, color:form.toProjectIds.includes(p.id)?"#34D399":"#CBD5E1", flex:1 }}>{p.name}</span>
+                    {form.toProjectIds.includes(p.id)&&<span style={{ color:"#34D399", fontSize:14 }}>✓</span>}
                   </label>
                 ))}
               </div>
+
+              {/* ── Hour Allocation per Project ── */}
               {form.toProjectIds.length>0&&(
-                <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:8 }}>
-                  {form.toProjectIds.map(id=>(
-                    <span key={id} style={{ fontSize:11, background:"rgba(52,211,153,.12)", color:"#34D399", padding:"3px 9px", borderRadius:10 }}>
-                      {data.projects.find(p=>p.id===id)?.name}
-                      <span style={{ marginLeft:4, cursor:"pointer" }} onClick={()=>handleToChange(id,false)}>✕</span>
-                    </span>
-                  ))}
+                <div style={{ marginTop:12 }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", textTransform:"uppercase", letterSpacing:".06em", marginBottom:8 }}>
+                    Hours/Day Allocation per Project
+                  </div>
+                  {form.toProjectIds.map(id=>{
+                    const proj=data.projects.find(p=>p.id===id);
+                    const hrs=form.projectHoursAllocation[id]||"";
+                    return (
+                      <div key={id} style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8, background:"#0F1117", border:"1px solid #2A2D3E", borderRadius:8, padding:"8px 12px" }}>
+                        <span style={{ width:6, height:6, borderRadius:"50%", background:"#34D399", flexShrink:0 }}></span>
+                        <span style={{ fontSize:12, color:"#CBD5E1", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{proj?.name}</span>
+                        <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                          <input
+                            type="number" min="0.5" max="24" step="0.5"
+                            value={hrs}
+                            onChange={e=>setProjectHours(id,e.target.value)}
+                            placeholder="hrs"
+                            style={{ width:64, background:"#1A1D27", border:"1px solid #2A2D3E", borderRadius:6, padding:"4px 8px", color:"#EF6461", fontSize:13, fontWeight:700, textAlign:"center", outline:"none" }}
+                          />
+                          <span style={{ fontSize:11, color:"#475569" }}>h/day</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Total bar */}
+                  {(()=>{
+                    const total=form.toProjectIds.reduce((s,id)=>s+(parseFloat(form.projectHoursAllocation[id])||0),0);
+                    const pct=Math.min(100,(total/8)*100);
+                    const over=total>8;
+                    const color=over?"#EF6461":total===8?"#34D399":"#FBBf24";
+                    return (
+                      <div style={{ marginTop:4 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                          <span style={{ fontSize:11, color:"#475569" }}>Total allocated</span>
+                          <span style={{ fontSize:13, fontWeight:800, fontFamily:"'Syne',sans-serif", color }}>{total.toFixed(1)}h/day {over?"⚠ exceeds 8h":total===8?"✓ full day":""}</span>
+                        </div>
+                        <div style={{ height:4, background:"#1E2130", borderRadius:4, overflow:"hidden" }}>
+                          <div style={{ height:"100%", width:`${pct}%`, background:color, borderRadius:4, transition:"width .3s" }}></div>
+                        </div>
+                        <div style={{ fontSize:10, color:"#334155", marginTop:4 }}>Standard workday = 8h. Leave blank if hours are flexible.</div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -1620,7 +1835,10 @@ function ResourceMovement({ data, updateData, showToast }) {
               </select>
             </div>
             <div className="form-group"><label className="form-label">Notes</label><textarea className="inp" rows={2} value={form.notes} onChange={e=>setForm(p=>({...p,notes:e.target.value}))} placeholder="Any additional context..." style={{ resize:"vertical" }} /></div>
-            <button className="btn-coral" style={{ width:"100%", padding:12 }} onClick={submit}>🔄 Record Movement</button>
+            <button className="btn-coral" style={{ width:"100%", padding:12 }} onClick={submit}>📤 Submit for Manager Approval</button>
+            <div style={{ marginTop:10, padding:"9px 14px", background:"rgba(251,191,36,.07)", border:"1px solid rgba(251,191,36,.18)", borderRadius:8, fontSize:11, color:"#FBBf24" }}>
+              ⚠ This request will be sent to the employee's current manager for approval before the assignment takes effect.
+            </div>
           </div>
           <div>
             <div style={{ fontSize:13, fontWeight:700, color:"#94A3B8", marginBottom:14, textTransform:"uppercase", letterSpacing:".06em" }}>Current Assignments</div>
@@ -1628,6 +1846,10 @@ function ResourceMovement({ data, updateData, showToast }) {
               {data.resources.map(r=>{
                 const active=getActiveProjects(r.id);
                 const mvCount=movements.filter(m=>m.resourceId===r.id).length;
+                // Get latest movement's allocation map
+                const latestMv=[...movements.filter(m=>m.resourceId===r.id)].sort((a,b)=>b.effectiveDate.localeCompare(a.effectiveDate))[0];
+                const allocMap=latestMv?.projectHoursAllocation||{};
+                const totalAlloc=active.reduce((s,p)=>s+(allocMap[p.id]||0),0);
                 return (
                   <div key={r.id} className="card" style={{ padding:"14px 18px" }}>
                     <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:active.length>0?8:0 }}>
@@ -1636,20 +1858,144 @@ function ResourceMovement({ data, updateData, showToast }) {
                         <div style={{ fontWeight:600, color:"#F1F5F9", fontSize:13 }}>{r.name}</div>
                         <div style={{ fontSize:11, color:"#475569" }}>{r.role}</div>
                       </div>
-                      {mvCount>0&&<div style={{ fontSize:10, color:"#475569" }}>{mvCount} movement{mvCount!==1?"s":""}</div>}
-                    </div>
-                    {active.length===0?<div style={{ fontSize:11, color:"#334155" }}>— Unassigned</div>:active.map(p=>(
-                      <div key={p.id} style={{ display:"flex", alignItems:"center", gap:6, marginTop:4 }}>
-                        <span style={{ width:6, height:6, borderRadius:"50%", background:"#34D399", flexShrink:0 }}></span>
-                        <span style={{ fontSize:12, color:"#34D399", fontWeight:500 }}>{p.name}</span>
-                        {p.endDate&&<span style={{ fontSize:10, color:"#475569", marginLeft:"auto" }}>until {fmt(p.endDate)}</span>}
+                      <div style={{ textAlign:"right" }}>
+                        {mvCount>0&&<div style={{ fontSize:10, color:"#475569" }}>{mvCount} move{mvCount!==1?"s":""}</div>}
+                        {totalAlloc>0&&<div style={{ fontSize:11, fontWeight:700, color:"#EF6461" }}>{totalAlloc}h/day</div>}
                       </div>
-                    ))}
+                    </div>
+                    {active.length===0?<div style={{ fontSize:11, color:"#334155" }}>— Unassigned</div>:active.map(p=>{
+                      const h=allocMap[p.id];
+                      const pct=totalAlloc>0?Math.round((h/totalAlloc)*100):null;
+                      return (
+                        <div key={p.id} style={{ marginTop:5 }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                            <span style={{ width:6, height:6, borderRadius:"50%", background:"#34D399", flexShrink:0 }}></span>
+                            <span style={{ fontSize:12, color:"#34D399", fontWeight:500, flex:1 }}>{p.name}</span>
+                            {h>0&&<span style={{ fontSize:11, fontWeight:700, color:"#EF6461", background:"rgba(239,100,97,.1)", padding:"2px 7px", borderRadius:6 }}>{h}h/day{pct!==null?` · ${pct}%`:""}</span>}
+                            {p.endDate&&<span style={{ fontSize:10, color:"#475569" }}>till {fmt(p.endDate)}</span>}
+                          </div>
+                          {h>0&&(
+                            <div style={{ marginTop:3, marginLeft:12, height:3, background:"#1E2130", borderRadius:3, overflow:"hidden" }}>
+                              <div style={{ height:"100%", width:`${Math.min(100,(h/8)*100)}%`, background:"#34D399", borderRadius:3 }}></div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {totalAlloc>0&&active.length>1&&(
+                      <div style={{ marginTop:8, paddingTop:6, borderTop:"1px solid #1E2130", fontSize:11, color:"#64748B", display:"flex", justifyContent:"space-between" }}>
+                        <span>Total allocated</span>
+                        <span style={{ fontWeight:700, color:totalAlloc>8?"#EF6461":"#34D399" }}>{totalAlloc}h/day {totalAlloc>8?"⚠":""}</span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
           </div>
+        </div>
+      )}
+
+      {tab==="requests"&&(
+        <div>
+          {allRequests.length===0?(
+            <div className="card" style={{ padding:48, textAlign:"center", color:"#475569" }}>
+              <div style={{ fontSize:36, marginBottom:12 }}>📋</div>
+              <div style={{ fontSize:14 }}>No movement requests yet. Create one using "New Request".</div>
+            </div>
+          ):(
+            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+              {allRequests.map(req=>{
+                const res=data.resources.find(r=>r.id===req.resourceId);
+                const manager=data.resources.find(r=>r.id===res?.managerId);
+                const fromProjs=(req.fromProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+                const toProjs=(req.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+                const alloc=req.projectHoursAllocation||{};
+                const totalAlloc=toProjs.reduce((s,p)=>s+(alloc[p.id]||0),0);
+                const isPending=req.status==="Pending";
+                const isApproved=req.status==="Approved";
+                const statusColors={Pending:"#FBBf24",Approved:"#34D399",Rejected:"#EF6461"};
+                const statusBgs={Pending:"rgba(251,191,36,.1)",Approved:"rgba(52,211,153,.1)",Rejected:"rgba(239,100,97,.1)"};
+                return (
+                  <div key={req.id} className="card" style={{ padding:0, overflow:"hidden", borderColor:isPending?"rgba(251,191,36,.25)":"#2A2D3E" }}>
+                    {/* Header */}
+                    <div style={{ background:"#141720", padding:"14px 20px", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:"1px solid #2A2D3E" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                        <div style={{ width:34, height:34, borderRadius:"50%", background:`linear-gradient(135deg,${stringToColor(res?.name||"")})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#fff", flexShrink:0 }}>{(res?.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2)}</div>
+                        <div>
+                          <div style={{ fontWeight:700, color:"#F1F5F9", fontSize:14 }}>{res?.name}</div>
+                          <div style={{ fontSize:11, color:"#64748B" }}>{res?.role} · Manager: {manager?.name||"—"}</div>
+                        </div>
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                        <span style={{ fontSize:12, fontWeight:700, color:statusColors[req.status], background:statusBgs[req.status], padding:"4px 12px", borderRadius:20, border:`1px solid ${statusColors[req.status]}44` }}>
+                          {req.status==="Pending"?"⏳ Pending Approval":req.status==="Approved"?"✓ Approved":"✗ Rejected"}
+                        </span>
+                        <span style={{ fontSize:11, color:"#475569" }}>{new Date(req.createdAt).toLocaleDateString("en-IN")}</span>
+                      </div>
+                    </div>
+
+                    <div style={{ padding:"16px 20px" }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:16, marginBottom:14 }}>
+                        <div>
+                          <div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>Movement Type</div>
+                          <span style={{ fontSize:12, background:"rgba(167,139,250,.12)", color:"#A78BFA", padding:"3px 9px", borderRadius:10, fontWeight:600 }}>{req.movementType}</span>
+                        </div>
+                        <div>
+                          <div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>Effective Date</div>
+                          <div style={{ fontSize:13, color:"#CBD5E1", fontWeight:500 }}>{fmt(req.effectiveDate)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>Reason</div>
+                          <div style={{ fontSize:12, color:"#94A3B8" }}>{req.reason||"—"}</div>
+                        </div>
+                      </div>
+
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:req.notes||req.approverComment?14:0 }}>
+                        <div style={{ background:"#0F1117", borderRadius:8, padding:"10px 14px" }}>
+                          <div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:6 }}>Moving Out From</div>
+                          {fromProjs.length>0?fromProjs.map(p=><div key={p.id} style={{ fontSize:12, color:"#EF6461", marginBottom:2 }}>📤 {p.name}</div>):<div style={{ fontSize:12, color:"#334155" }}>— New assignment</div>}
+                        </div>
+                        <div style={{ background:"#0F1117", borderRadius:8, padding:"10px 14px" }}>
+                          <div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:6 }}>Assigning To</div>
+                          {toProjs.map(p=>{
+                            const h=alloc[p.id];
+                            return (
+                              <div key={p.id} style={{ display:"flex", alignItems:"center", gap:6, marginBottom:3 }}>
+                                <span style={{ fontSize:12, color:"#34D399", fontWeight:600 }}>📥 {p.name}</span>
+                                {h>0&&<span style={{ fontSize:11, background:"rgba(239,100,97,.12)", color:"#EF6461", padding:"1px 6px", borderRadius:6, fontWeight:700, flexShrink:0 }}>{h}h/day</span>}
+                              </div>
+                            );
+                          })}
+                          {totalAlloc>0&&toProjs.length>1&&<div style={{ fontSize:10, color:"#475569", marginTop:4, borderTop:"1px solid #1E2130", paddingTop:4 }}>Total: {totalAlloc}h/day</div>}
+                        </div>
+                      </div>
+
+                      {req.notes&&<div style={{ background:"rgba(96,165,250,.05)", border:"1px solid rgba(96,165,250,.15)", borderRadius:8, padding:"9px 14px", fontSize:12, color:"#64748B", marginBottom:10 }}>📝 {req.notes}</div>}
+
+                      {req.approverComment&&(
+                        <div style={{ background:isApproved?"rgba(52,211,153,.07)":"rgba(239,100,97,.07)", border:`1px solid ${isApproved?"rgba(52,211,153,.2)":"rgba(239,100,97,.2)"}`, borderRadius:8, padding:"9px 14px", fontSize:12, color:isApproved?"#34D399":"#EF6461", marginBottom:10 }}>
+                          💬 Manager comment: {req.approverComment}
+                        </div>
+                      )}
+
+                      {req.resolvedAt&&(
+                        <div style={{ fontSize:11, color:"#475569", marginBottom:8 }}>
+                          {req.status==="Approved"?"✓ Approved":"✗ Rejected"} by {data.resources.find(r=>r.id===req.approverId)?.name||"—"} · {new Date(req.resolvedAt).toLocaleDateString("en-IN")}
+                        </div>
+                      )}
+
+                      {isPending&&(
+                        <div style={{ marginTop:10, padding:"10px 14px", background:"rgba(251,191,36,.06)", border:"1px solid rgba(251,191,36,.15)", borderRadius:8, fontSize:12, color:"#FBBf24" }}>
+                          ⏳ Awaiting approval from <strong>{manager?.name||"manager"}</strong>. The assignment will only activate once approved.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -1664,13 +2010,15 @@ function ResourceMovement({ data, updateData, showToast }) {
                 <button className="btn-ghost" style={{ fontSize:12, color:"#34D399", borderColor:"rgba(52,211,153,.3)" }} onClick={exportMovementsExcel}>⬇ Download Excel</button>
               </div>
               <div style={{ overflowX:"auto" }}>
-              <table style={{ minWidth:800 }}>
-                <thead><tr><th>Employee</th><th>Type</th><th>From</th><th>To</th><th>Effective Date</th><th>Reason</th><th></th></tr></thead>
+              <table style={{ minWidth:900 }}>
+                <thead><tr><th>Employee</th><th>Type</th><th>From</th><th>To (with Allocation)</th><th>Effective Date</th><th>Reason</th><th></th></tr></thead>
                 <tbody>
                   {filteredMovements.map(m=>{
                     const res=data.resources.find(r=>r.id===m.resourceId);
                     const fromProjs=(m.fromProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
                     const toProjs=(m.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+                    const alloc=m.projectHoursAllocation||{};
+                    const totalAlloc=toProjs.reduce((s,p)=>s+(alloc[p.id]||0),0);
                     return (
                       <tr key={m.id}>
                         <td>
@@ -1682,13 +2030,24 @@ function ResourceMovement({ data, updateData, showToast }) {
                         <td><span style={{ fontSize:11, background:"rgba(167,139,250,.12)", color:"#A78BFA", padding:"3px 9px", borderRadius:12, fontWeight:600 }}>{m.movementType}</span></td>
                         <td>{fromProjs.length>0?fromProjs.map(p=><div key={p.id} style={{ fontSize:12, color:"#EF6461" }}>{p.name}</div>):<span style={{ color:"#334155", fontSize:12 }}>— New assignment</span>}</td>
                         <td>
-                          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                            <span style={{ color:"#34D399", fontSize:14 }}>→</span>
-                            <div>{toProjs.map(p=><div key={p.id} style={{ fontSize:12, color:"#34D399", fontWeight:600 }}>{p.name}</div>)}</div>
+                          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                            {toProjs.map(p=>{
+                              const h=alloc[p.id];
+                              return (
+                                <div key={p.id} style={{ display:"flex", alignItems:"center", gap:6 }}>
+                                  <span style={{ color:"#34D399", fontSize:12 }}>→</span>
+                                  <span style={{ fontSize:12, color:"#34D399", fontWeight:600 }}>{p.name}</span>
+                                  {h>0&&<span style={{ fontSize:11, background:"rgba(239,100,97,.12)", color:"#EF6461", padding:"1px 7px", borderRadius:8, fontWeight:700, flexShrink:0 }}>{h}h/day</span>}
+                                </div>
+                              );
+                            })}
+                            {totalAlloc>0&&toProjs.length>1&&(
+                              <div style={{ fontSize:10, color:"#475569", borderTop:"1px solid #1E2130", paddingTop:3, marginTop:2 }}>Total: {totalAlloc}h/day</div>
+                            )}
                           </div>
                         </td>
                         <td style={{ fontSize:12, color:"#94A3B8" }}>{fmt(m.effectiveDate)}</td>
-                        <td style={{ fontSize:12, color:"#64748B", maxWidth:160 }}>{m.reason||"—"}</td>
+                        <td style={{ fontSize:12, color:"#64748B", maxWidth:140 }}>{m.reason||"—"}</td>
                         <td><button style={{ background:"none", border:"none", color:"#475569", cursor:"pointer", fontSize:14, padding:4 }} onClick={()=>deleteMovement(m.id)}>✕</button></td>
                       </tr>
                     );
@@ -1905,6 +2264,207 @@ function ExcelPanel({ data, updateData, showToast }) {
 }
 
 // ══════════════════════════════════════════════
+// MOVEMENT APPROVALS (Manager view)
+// ══════════════════════════════════════════════
+function MovementApprovals({ data, updateData, showToast, currentUser }) {
+  const [comment, setComment] = useState({}); // { requestId: commentText }
+
+  // Get all pending requests for employees reporting to this manager
+  const teamIds=data.resources.filter(r=>r.managerId===currentUser.id).map(r=>r.id);
+  const allRequests=(data.movementRequests||[])
+    .filter(req=>teamIds.includes(req.resourceId))
+    .sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  const pending=allRequests.filter(r=>r.status==="Pending");
+  const resolved=allRequests.filter(r=>r.status!=="Pending");
+
+  function approve(req) {
+    const c=comment[req.id]||"";
+    // Create the actual movement record
+    const movement={
+      id:uid(),
+      resourceId:req.resourceId,
+      fromProjectIds:req.fromProjectIds,
+      toProjectIds:req.toProjectIds,
+      projectHoursAllocation:req.projectHoursAllocation,
+      effectiveDate:req.effectiveDate,
+      reason:req.reason,
+      movementType:req.movementType,
+      notes:req.notes,
+      createdAt:new Date().toISOString(),
+    };
+    updateData(prev=>({
+      ...prev,
+      resourceMovements:[...(prev.resourceMovements||[]),movement],
+      movementRequests:prev.movementRequests.map(r=>r.id===req.id
+        ?{...r,status:"Approved",approverId:currentUser.id,approverComment:c,resolvedAt:new Date().toISOString()}
+        :r
+      ),
+    }));
+    setComment(p=>({...p,[req.id]:""}));
+    const res=data.resources.find(r=>r.id===req.resourceId);
+    showToast(`Approved — ${res?.name} assignment is now active`);
+  }
+
+  function reject(req) {
+    const c=comment[req.id]||"";
+    updateData(prev=>({
+      ...prev,
+      movementRequests:prev.movementRequests.map(r=>r.id===req.id
+        ?{...r,status:"Rejected",approverId:currentUser.id,approverComment:c,resolvedAt:new Date().toISOString()}
+        :r
+      ),
+    }));
+    setComment(p=>({...p,[req.id]:""}));
+    const res=data.resources.find(r=>r.id===req.resourceId);
+    showToast(`Rejected — ${res?.name} movement request declined`,"error");
+  }
+
+  function approveAll() {
+    const movements=pending.map(req=>({
+      id:uid(),resourceId:req.resourceId,
+      fromProjectIds:req.fromProjectIds,toProjectIds:req.toProjectIds,
+      projectHoursAllocation:req.projectHoursAllocation,
+      effectiveDate:req.effectiveDate,reason:req.reason,
+      movementType:req.movementType,notes:req.notes,
+      createdAt:new Date().toISOString(),
+    }));
+    const now=new Date().toISOString();
+    updateData(prev=>({
+      ...prev,
+      resourceMovements:[...(prev.resourceMovements||[]),...movements],
+      movementRequests:prev.movementRequests.map(r=>
+        pending.some(p=>p.id===r.id)
+          ?{...r,status:"Approved",approverId:currentUser.id,approverComment:"Bulk approved",resolvedAt:now}
+          :r
+      ),
+    }));
+    showToast(`${pending.length} movement request${pending.length!==1?"s":""} approved`);
+  }
+
+  const statusColors={Pending:"#FBBf24",Approved:"#34D399",Rejected:"#EF6461"};
+  const statusBgs={Pending:"rgba(251,191,36,.1)",Approved:"rgba(52,211,153,.1)",Rejected:"rgba(239,100,97,.1)"};
+
+  function RequestCard({req,showActions}) {
+    const res=data.resources.find(r=>r.id===req.resourceId);
+    const fromProjs=(req.fromProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+    const toProjs=(req.toProjectIds||[]).map(id=>data.projects.find(p=>p.id===id)).filter(Boolean);
+    const alloc=req.projectHoursAllocation||{};
+    const totalAlloc=toProjs.reduce((s,p)=>s+(alloc[p.id]||0),0);
+    return (
+      <div className="card" style={{ padding:0, overflow:"hidden", borderColor:req.status==="Pending"?"rgba(251,191,36,.3)":"#2A2D3E" }}>
+        <div style={{ background:"#141720", padding:"14px 20px", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:"1px solid #2A2D3E" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ width:36, height:36, borderRadius:"50%", background:`linear-gradient(135deg,${stringToColor(res?.name||"")})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700, color:"#fff", flexShrink:0 }}>{(res?.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2)}</div>
+            <div>
+              <div style={{ fontWeight:700, color:"#F1F5F9", fontSize:14 }}>{res?.name}</div>
+              <div style={{ fontSize:11, color:"#64748B" }}>{res?.role}</div>
+            </div>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <span style={{ fontSize:11, background:"rgba(167,139,250,.12)", color:"#A78BFA", padding:"3px 9px", borderRadius:10, fontWeight:600 }}>{req.movementType}</span>
+            <span style={{ fontSize:11, fontWeight:700, color:statusColors[req.status], background:statusBgs[req.status], padding:"4px 12px", borderRadius:20, border:`1px solid ${statusColors[req.status]}44` }}>
+              {req.status==="Pending"?"⏳ Pending":req.status==="Approved"?"✓ Approved":"✗ Rejected"}
+            </span>
+            <span style={{ fontSize:11, color:"#475569" }}>{new Date(req.createdAt).toLocaleDateString("en-IN")}</span>
+          </div>
+        </div>
+
+        <div style={{ padding:"16px 20px" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:14 }}>
+            <div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>From</div>
+              {fromProjs.length>0?fromProjs.map(p=><div key={p.id} style={{ fontSize:12, color:"#EF6461" }}>📤 {p.name}</div>):<div style={{ fontSize:12, color:"#334155" }}>— New assignment</div>}
+            </div>
+            <div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>To (with Hours)</div>
+              {toProjs.map(p=>{
+                const h=alloc[p.id];
+                return <div key={p.id} style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:"#34D399", marginBottom:2, fontWeight:600 }}>
+                  📥 {p.name}{h>0&&<span style={{ fontSize:10, background:"rgba(239,100,97,.12)", color:"#EF6461", padding:"1px 6px", borderRadius:6, fontWeight:700 }}>{h}h/day</span>}
+                </div>;
+              })}
+              {totalAlloc>0&&toProjs.length>1&&<div style={{ fontSize:10, color:"#475569", marginTop:2 }}>Total: {totalAlloc}h/day</div>}
+            </div>
+            <div>
+              <div><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>Effective</div><div style={{ fontSize:13, color:"#CBD5E1", fontWeight:500 }}>{fmt(req.effectiveDate)}</div></div>
+              {req.reason&&<div style={{ marginTop:6 }}><div style={{ fontSize:10, color:"#475569", textTransform:"uppercase", letterSpacing:".06em", marginBottom:2 }}>Reason</div><div style={{ fontSize:12, color:"#94A3B8" }}>{req.reason}</div></div>}
+            </div>
+          </div>
+
+          {req.notes&&<div style={{ background:"rgba(96,165,250,.05)", border:"1px solid rgba(96,165,250,.15)", borderRadius:8, padding:"8px 14px", fontSize:12, color:"#64748B", marginBottom:12 }}>📝 {req.notes}</div>}
+
+          {showActions&&(
+            <div style={{ borderTop:"1px solid #2A2D3E", paddingTop:14, marginTop:4 }}>
+              <div className="form-group" style={{ marginBottom:10 }}>
+                <label className="form-label">Comment (optional)</label>
+                <input className="inp" value={comment[req.id]||""} onChange={e=>setComment(p=>({...p,[req.id]:e.target.value}))} placeholder="Add a note for the HR team..." />
+              </div>
+              <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+                <button className="btn-ghost" style={{ color:"#EF6461", borderColor:"rgba(239,100,97,.3)" }} onClick={()=>reject(req)}>✗ Reject</button>
+                <button className="btn-coral" onClick={()=>approve(req)}>✓ Approve & Activate</button>
+              </div>
+            </div>
+          )}
+
+          {!showActions&&req.approverComment&&(
+            <div style={{ background:req.status==="Approved"?"rgba(52,211,153,.07)":"rgba(239,100,97,.07)", border:`1px solid ${req.status==="Approved"?"rgba(52,211,153,.2)":"rgba(239,100,97,.2)"}`, borderRadius:8, padding:"8px 14px", fontSize:12, color:req.status==="Approved"?"#34D399":"#EF6461" }}>
+              💬 {req.approverComment} · {new Date(req.resolvedAt).toLocaleDateString("en-IN")}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24 }}>
+        <div>
+          <div className="section-title">Movement Approvals</div>
+          <div style={{ fontSize:13, color:"#475569", marginTop:4 }}>Review and approve resource movement and hour allocation requests for your team</div>
+        </div>
+        {pending.length>0&&<button className="btn-coral" onClick={approveAll}>✓ Approve All ({pending.length})</button>}
+      </div>
+
+      {/* Pending */}
+      {pending.length>0&&(
+        <div style={{ marginBottom:28 }}>
+          <div style={{ fontSize:13, fontWeight:700, color:"#FBBf24", marginBottom:12, display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ width:8, height:8, borderRadius:"50%", background:"#FBBf24", display:"inline-block" }}></span>
+            Pending Approval ({pending.length})
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            {pending.map(req=><RequestCard key={req.id} req={req} showActions={true} />)}
+          </div>
+        </div>
+      )}
+
+      {pending.length===0&&(
+        <div className="card" style={{ padding:48, textAlign:"center", marginBottom:28 }}>
+          <div style={{ fontSize:40, marginBottom:12 }}>✅</div>
+          <div style={{ fontSize:15, fontWeight:600, color:"#94A3B8" }}>All caught up!</div>
+          <div style={{ fontSize:13, color:"#475569", marginTop:6 }}>No pending movement requests from your team.</div>
+        </div>
+      )}
+
+      {/* Resolved */}
+      {resolved.length>0&&(
+        <div>
+          <div style={{ fontSize:13, fontWeight:700, color:"#64748B", marginBottom:12, display:"flex", alignItems:"center", gap:8 }}>
+            <span>History ({resolved.length})</span>
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {resolved.map(req=><RequestCard key={req.id} req={req} showActions={false} />)}
+          </div>
+        </div>
+      )}
+
+      {allRequests.length===0&&(
+        <div style={{ fontSize:13, color:"#334155", textAlign:"center", padding:"20px 0" }}>No movement requests found for your team.</div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
 // MAIN APP
 // ══════════════════════════════════════════════
 export default function App() {
@@ -1966,6 +2526,7 @@ export default function App() {
     ]},
     ...(isManager?[{groupLabel:"Manager",items:[
       {id:"approvals",label:"Approvals",icon:"✅"},
+      {id:"movement-approvals",label:"Movement Approvals",icon:"🔄"},
       {id:"team-view",label:"Team Overview",icon:"📈"},
       {id:"assign-task",label:"Assign Tasks",icon:"📝"},
     ]}]:[]),
@@ -1976,7 +2537,9 @@ export default function App() {
   ];
 
   const teamIds     = data.resources.filter(r=>r.managerId===currentUser.id).map(r=>r.id);
-  const pendingCount= data.timeLogs.filter(t=>teamIds.includes(t.resourceId)&&t.status==="Pending").length;
+  const pendingTimesheetCount= data.timeLogs.filter(t=>teamIds.includes(t.resourceId)&&t.status==="Pending").length;
+  const pendingMovementCount = (data.movementRequests||[]).filter(r=>teamIds.includes(r.resourceId)&&r.status==="Pending").length;
+  const pendingCount = pendingTimesheetCount + pendingMovementCount;
 
   return (
     <div style={{ fontFamily:"'DM Sans','Segoe UI',sans-serif", background:"#0F1117", minHeight:"100vh", color:"#E2E8F0", position:"relative" }}>
@@ -2008,9 +2571,14 @@ export default function App() {
               <div style={{ fontSize:10, color:"#475569" }}>{currentUser.id}{currentUser.isHR?" · HR Admin":""}{currentUser.isManager?" · Manager":""}</div>
             </div>
           </div>
-          {pendingCount>0&&isManager&&(
+          {pendingTimesheetCount>0&&isManager&&(
             <div style={{ background:"rgba(251,191,36,.15)", border:"1px solid rgba(251,191,36,.3)", borderRadius:8, padding:"5px 12px", fontSize:12, color:"#FBBf24", fontWeight:600 }}>
-              ⏳ {pendingCount} pending approval{pendingCount!==1?"s":""}
+              ⏳ {pendingTimesheetCount} timesheet{pendingTimesheetCount!==1?"s":""}
+            </div>
+          )}
+          {pendingMovementCount>0&&isManager&&(
+            <div style={{ background:"rgba(167,139,250,.15)", border:"1px solid rgba(167,139,250,.3)", borderRadius:8, padding:"5px 12px", fontSize:12, color:"#A78BFA", fontWeight:600 }}>
+              🔄 {pendingMovementCount} movement{pendingMovementCount!==1?"s":""}
             </div>
           )}
           <button className="btn-ghost" style={{ fontSize:12, padding:"6px 14px" }} onClick={handleLogout}>Sign Out</button>
@@ -2028,8 +2596,11 @@ export default function App() {
                 <div key={item.id} className={`nav-item${activeSection===item.id?" active":""}`} onClick={()=>setActiveSection(item.id)}>
                   <span>{item.icon}</span>
                   <span>{item.label}</span>
-                  {item.id==="approvals"&&pendingCount>0&&(
-                    <span style={{ marginLeft:"auto", background:"#EF6461", color:"#fff", borderRadius:20, padding:"1px 6px", fontSize:10 }}>{pendingCount}</span>
+                  {item.id==="approvals"&&pendingTimesheetCount>0&&(
+                    <span style={{ marginLeft:"auto", background:"#EF6461", color:"#fff", borderRadius:20, padding:"1px 6px", fontSize:10 }}>{pendingTimesheetCount}</span>
+                  )}
+                  {item.id==="movement-approvals"&&pendingMovementCount>0&&(
+                    <span style={{ marginLeft:"auto", background:"#FBBf24", color:"#0F1117", borderRadius:20, padding:"1px 6px", fontSize:10 }}>{pendingMovementCount}</span>
                   )}
                 </div>
               ))}
@@ -2051,9 +2622,10 @@ export default function App() {
           {activeSection==="my-logs"              && <MyLogs data={data} currentUser={currentUser} />}
           {activeSection==="my-tasks"             && <MyTasks data={data} updateData={updateData} showToast={showToast} currentUser={currentUser} />}
 
-          {isManager&&activeSection==="approvals"   && <Approvals data={data} updateData={updateData} showToast={showToast} currentUser={currentUser} />}
-          {isManager&&activeSection==="team-view"   && <TeamView data={data} currentUser={currentUser} />}
-          {isManager&&activeSection==="assign-task" && <AssignTask data={data} updateData={updateData} showToast={showToast} currentUser={currentUser} />}
+          {isManager&&activeSection==="approvals"         && <Approvals data={data} updateData={updateData} showToast={showToast} currentUser={currentUser} />}
+          {isManager&&activeSection==="movement-approvals" && <MovementApprovals data={data} updateData={updateData} showToast={showToast} currentUser={currentUser} />}
+          {isManager&&activeSection==="team-view"          && <TeamView data={data} currentUser={currentUser} />}
+          {isManager&&activeSection==="assign-task"        && <AssignTask data={data} updateData={updateData} showToast={showToast} currentUser={currentUser} />}
 
           {(isHR||isManager)&&activeSection==="report-employee" && <EmployeeReport data={data} currentUser={currentUser} isHR={isHR} />}
           {(isHR||isManager)&&activeSection==="report-project"  && <ProjectReport data={data} />}
